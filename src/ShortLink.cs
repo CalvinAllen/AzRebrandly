@@ -9,6 +9,7 @@ using Microsoft.Azure.KeyVault;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
 using Newtonsoft.Json;
+using RestSharp;
 
 namespace CalvinAAllen.AzRebrandly
 {
@@ -19,52 +20,57 @@ namespace CalvinAAllen.AzRebrandly
             [HttpTrigger(AuthorizationLevel.Anonymous, "post", Route = null)] HttpRequest req,
             ILogger log)
         {
-            
+            string requestBody = await new StreamReader(req.Body).ReadToEndAsync();
+            dynamic data = JsonConvert.DeserializeObject(requestBody);
+
             AzureServiceTokenProvider azureServiceTokenProvider = new AzureServiceTokenProvider();
             try
-            {
-                var keyVaultClient = new KeyVaultClient(
-                    new KeyVaultClient.AuthenticationCallback(azureServiceTokenProvider.KeyVaultTokenCallback));
+			{
+				var keyVaultClient = new KeyVaultClient(
+					new KeyVaultClient.AuthenticationCallback(azureServiceTokenProvider.KeyVaultTokenCallback));
 
-                var secret = await 
-                    keyVaultClient
-                    .GetSecretAsync("https://azfunctionkeyvault.vault.azure.net/secrets/RebrandlyWorkspaceKey")
-                    .ConfigureAwait(false);
+				string workspaceKey = await GetSecret(keyVaultClient, "RebrandlyWorkspaceKey");
+				string apiKey = await GetSecret(keyVaultClient, "RebrandlyApiKey");
 
-                return (ActionResult)new OkObjectResult($"{secret.Value}");
-            }
-            catch (Exception ex)
+				var rebrandlyUrl = GetEnvironmentVariable("RebrandlyApiUrl");
+				var rebrandlyDomain = GetEnvironmentVariable("RebrandlyDomain");
+
+				var client = new RestClient(rebrandlyUrl);
+
+				var request = new RestRequest("/links");
+				request.Method = Method.POST;
+				request.AddHeader("Content-Type", "application/json");
+				request.AddHeader("apikey", apiKey.Value);
+				request.AddHeader("workspace", workspaceKey.Value);
+				request.AddJsonBody($@"{{
+                    ""destination"": ""{data?.destination}"",
+                    ""domain"":{{
+                        ""fullName"": ""{rebrandlyDomain}""
+                    }}
+                }}");
+
+				var response = client.Execute(request);
+				dynamic content = JsonConvert.DeserializeObject(response.Content);
+
+				return (ActionResult)new OkObjectResult($"{content.shortUrl}");
+			}
+			catch (Exception ex)
             {
                 return new BadRequestObjectResult(ex.Message);
             }
+        }
 
-            //string requestBody = await new StreamReader(req.Body).ReadToEndAsync();
-            //dynamic data = JsonConvert.DeserializeObject(requestBody);
+		private static async Task<string> GetSecret(KeyVaultClient keyVaultClient, string secretName)
+		{
+			return await
+				keyVaultClient
+				.GetSecretAsync($"https://azfunctionkeyvault.vault.azure.net/secrets/{secretName}")
+				.ConfigureAwait(false);
+		}
 
-            //App Settings?
-            // Rebrandly API Uri: https://api.rebrandly.com/v1/links
-            // Domain: luv2.dev
-            /*
-                {
-                    "destination": "https://www.calvinallen.net/sdjfnahdsfaf",
-                    "domain":{
-                        "fullName": "luv2.dev"
-                    }
-                }
-            */
-
-
-            //{
-            //    "destination": "https://www.calvinallen.net/sdjfnahdsfaf";
-            //}  
-            //var destinationUrl = data?.destination;
-
-            // [SKIP] Check our spreadsheet for the destination --> short mapping
-            // [SKIP] If exists, return the short url from the spreadsheet
-            // If doesn't exist, call Rebrandly to shorten it, store the result/mapping in the spreadsheet
-            //      return the shorturl
-
-            //return (ActionResult)new OkObjectResult($"{secret.}");
+		public static string GetEnvironmentVariable(string name)
+        {
+            return System.Environment.GetEnvironmentVariable(name, EnvironmentVariableTarget.Process);
         }
     }
 }
