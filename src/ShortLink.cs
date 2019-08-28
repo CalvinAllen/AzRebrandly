@@ -12,6 +12,7 @@ using Newtonsoft.Json;
 using RestSharp;
 using Microsoft.Azure.KeyVault.Models;
 using Microsoft.Azure.Cosmos;
+using System.Linq;
 
 namespace CalvinAAllen.AzRebrandly
 {
@@ -22,12 +23,15 @@ namespace CalvinAAllen.AzRebrandly
             [HttpTrigger(AuthorizationLevel.Anonymous, "post", Route = null)] HttpRequest req,
             ILogger log)
         {
-            string requestBody = await new StreamReader(req.Body).ReadToEndAsync();
-            dynamic data = JsonConvert.DeserializeObject(requestBody);
-
-            AzureServiceTokenProvider azureServiceTokenProvider = new AzureServiceTokenProvider();
             try
 			{
+			    string requestBody = await new StreamReader(req.Body).ReadToEndAsync();
+            	dynamic data = JsonConvert.DeserializeObject(requestBody);
+
+				var destination = data?.destination ?? throw new ArgumentNullException("Destination was not provided in the payload.");
+
+            	AzureServiceTokenProvider azureServiceTokenProvider = new AzureServiceTokenProvider();
+
 				var keyVaultClient = new KeyVaultClient(
 					new KeyVaultClient.AuthenticationCallback(azureServiceTokenProvider.KeyVaultTokenCallback));
 
@@ -44,11 +48,18 @@ namespace CalvinAAllen.AzRebrandly
 				var cosmosClient = new CosmosClient(cosmosEndpoint, cosmosKey.Value);
 				var container = cosmosClient.GetContainer(cosmosDatabase, cosmosContainer);
 
-				// TODO - Get an existing mapping from Cosmos, given a Destination Url
-				//QueryDefinition query = new QueryDefinition("SELECT c.ShortUrl FROM c WHERE c.DestinationUrl");
-				//container.GetItemQueryIterator()
+				QueryDefinition query = new QueryDefinition($"SELECT c.DestinationUrl, c.ShortUrl FROM c WHERE c.DestinationUrl = '{destination}'");
+				var results = container.GetItemQueryIterator<Mapping>(query);
 
-				// TODO - If mapping doesn't exist, call Rebrandly API and create one.
+				if (results.HasMoreResults){
+					var existingMapping = await results.ReadNextAsync();
+					var firstResult = existingMapping?.FirstOrDefault();
+
+					if(firstResult != null){
+						return (ActionResult)new OkObjectResult($"{firstResult.ShortUrl}");
+					}
+				}
+
 				var client = new RestClient(rebrandlyUrl);
 				var request = new RestRequest("/links");
 				request.Method = Method.POST;
@@ -56,7 +67,7 @@ namespace CalvinAAllen.AzRebrandly
 				request.AddHeader("apikey", apiKey.Value);
 				request.AddHeader("workspace", workspaceKey.Value);
 				request.AddJsonBody($@"{{
-                    ""destination"": ""{data?.destination}"",
+                    ""destination"": ""{destination}"",
                     ""domain"":{{
                         ""fullName"": ""{rebrandlyDomain}""
                     }}
@@ -66,7 +77,7 @@ namespace CalvinAAllen.AzRebrandly
 				dynamic content = JsonConvert.DeserializeObject(response.Content);
 
 				var mapping = new Mapping {
-					DestinationUrl = data?.destination,
+					DestinationUrl = destination,
 					ShortUrl = content.shortUrl
 				};
 
