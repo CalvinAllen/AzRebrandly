@@ -97,9 +97,11 @@ namespace CalvinAAllen.AzRebrandly
 
 		private static async Task<SecretBundle> GetSecret(KeyVaultClient keyVaultClient, string secretName)
 		{
+			var keyVaultUrl = GetEnvironmentVariable("KeyVaultUrl");
+
 			return await
 				keyVaultClient
-				.GetSecretAsync($"https://azfunctionkeyvault.vault.azure.net/secrets/{secretName}")
+				.GetSecretAsync($"{keyVaultUrl}/{secretName}")
 				.ConfigureAwait(false);
 		}
 
