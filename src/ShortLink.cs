@@ -1,71 +1,76 @@
 using System;
 using System.IO;
+using System.Linq;
 using System.Threading.Tasks;
+using Azure.Identity;
+using Azure.Security.KeyVault.Secrets;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Azure.WebJobs;
 using Microsoft.Azure.WebJobs.Extensions.Http;
-using Microsoft.Azure.Services.AppAuthentication;
-using Microsoft.Azure.KeyVault;
 using Microsoft.AspNetCore.Http;
+using Microsoft.Azure.Cosmos;
 using Microsoft.Extensions.Logging;
 using Newtonsoft.Json;
 using RestSharp;
-using Microsoft.Azure.KeyVault.Models;
-using Microsoft.Azure.Cosmos;
-using System.Linq;
 
-namespace CalvinAAllen.AzRebrandly
+namespace CalvinAllen.AzureFunctions.AZRebrandly
 {
-    public static class ShortLink
-    {
-        [FunctionName("ShortLink")]
-        public static async Task<IActionResult> Run(
-            [HttpTrigger(AuthorizationLevel.Anonymous, "post", Route = null)] HttpRequest req,
-            ILogger log)
-        {
-            try
+    public class ShortLink
+	{
+		[FunctionName("ShortLink")]
+		public async Task<IActionResult> Run(
+			[HttpTrigger(AuthorizationLevel.Function, "post", Route = null)]
+			HttpRequest req,
+			ILogger log)
+		{
+			try
 			{
-			    string requestBody = await new StreamReader(req.Body).ReadToEndAsync();
-            	dynamic data = JsonConvert.DeserializeObject(requestBody);
+				var requestBody = await new StreamReader(req.Body).ReadToEndAsync();
+				dynamic data = JsonConvert.DeserializeObject(requestBody);
 
-				var destination = data?.destination ?? throw new ArgumentNullException("Destination was not provided in the payload.");
+				var destination = data?.destination ??
+				                  throw new ApplicationException("Destination was not provided in the payload.");
+				
+				var keyVaultUrl = GetSetting("KeyVaultUrl");
+				var secretClient = new SecretClient(new Uri(keyVaultUrl), new DefaultAzureCredential());
 
-            	AzureServiceTokenProvider azureServiceTokenProvider = new AzureServiceTokenProvider();
+				var workspaceKey = secretClient.GetSecret("RebrandlyWorkspaceKey");
+				var apiKey = secretClient.GetSecret("RebrandlyApiKey");
+				var cosmosKey = secretClient.GetSecret("CosmosKey");
 
-				var keyVaultClient = new KeyVaultClient(
-					new KeyVaultClient.AuthenticationCallback(azureServiceTokenProvider.KeyVaultTokenCallback));
+				var rebrandlyUrl = GetSetting("RebrandlyApiUrl");
+				var rebrandlyDomain = GetSetting("RebrandlyDomain");
+				var cosmosEndpoint = GetSetting("CosmosEndpoint");
+				var cosmosDatabase = GetSetting("CosmosDatabaseName");
+				var cosmosContainer = GetSetting("CosmosContainerName");
 
-				var workspaceKey = await GetSecret(keyVaultClient, "RebrandlyWorkspaceKey");
-				var apiKey = await GetSecret(keyVaultClient, "RebrandlyApiKey");
-				var cosmosKey = await GetSecret(keyVaultClient, "CosmosKey");
-
-				var rebrandlyUrl = GetEnvironmentVariable("RebrandlyApiUrl");
-				var rebrandlyDomain = GetEnvironmentVariable("RebrandlyDomain");
-				var cosmosEndpoint = GetEnvironmentVariable("CosmosEndpoint");
-				var cosmosDatabase = GetEnvironmentVariable("CosmosDatabaseName");
-				var cosmosContainer = GetEnvironmentVariable("CosmosContainerName");
-
-				var cosmosClient = new CosmosClient(cosmosEndpoint, cosmosKey.Value);
+				var cosmosClient = new CosmosClient(cosmosEndpoint, cosmosKey.Value.Value);
 				var container = cosmosClient.GetContainer(cosmosDatabase, cosmosContainer);
 
-				QueryDefinition query = new QueryDefinition($"SELECT c.DestinationUrl, c.ShortUrl FROM c WHERE c.DestinationUrl = '{destination}'");
+				var query =
+					new QueryDefinition(
+						$"SELECT c.DestinationUrl, c.ShortUrl FROM c WHERE c.DestinationUrl = '{destination}'");
 				var results = container.GetItemQueryIterator<Mapping>(query);
 
-				if (results.HasMoreResults){
+				if (results.HasMoreResults)
+				{
 					var existingMapping = await results.ReadNextAsync();
 					var firstResult = existingMapping?.FirstOrDefault();
 
-					if(firstResult != null){
-						return (ActionResult)new OkObjectResult($"{firstResult.ShortUrl}");
+					if (firstResult != null)
+					{
+						return new OkObjectResult($"{firstResult.ShortUrl}");
 					}
 				}
 
 				var client = new RestClient(rebrandlyUrl);
-				var request = new RestRequest("/links");
-				request.Method = Method.POST;
+				var request = new RestRequest("/links")
+				{
+					Method = Method.POST
+				};
 				request.AddHeader("Content-Type", "application/json");
-				request.AddHeader("apikey", apiKey.Value);
-				request.AddHeader("workspace", workspaceKey.Value);
+				request.AddHeader("apikey", apiKey.Value.Value);
+				request.AddHeader("workspace", workspaceKey.Value.Value);
 				request.AddJsonBody($@"{{
                     ""destination"": ""{destination}"",
                     ""domain"":{{
@@ -73,10 +78,11 @@ namespace CalvinAAllen.AzRebrandly
                     }}
                 }}");
 
-				var response = client.Execute(request);
+				var response = await client.ExecutePostAsync(request);
 				dynamic content = JsonConvert.DeserializeObject(response.Content);
 
-				var mapping = new Mapping {
+				var mapping = new Mapping
+				{
 					DestinationUrl = destination,
 					ShortUrl = content.shortUrl
 				};
@@ -87,27 +93,17 @@ namespace CalvinAAllen.AzRebrandly
 					$@"Created Document: Destination = {result.Resource.DestinationUrl}, 
 					Short = {result.Resource.ShortUrl}");
 
-				return (ActionResult)new OkObjectResult($"{content.shortUrl}");
+				return new OkObjectResult($"{content.shortUrl}");
 			}
 			catch (Exception ex)
-            {
-                return new BadRequestObjectResult(ex.Message);
-            }
-        }
-
-		private static async Task<SecretBundle> GetSecret(KeyVaultClient keyVaultClient, string secretName)
-		{
-			var keyVaultUrl = GetEnvironmentVariable("KeyVaultUrl");
-
-			return await
-				keyVaultClient
-				.GetSecretAsync($"{keyVaultUrl}/{secretName}")
-				.ConfigureAwait(false);
+			{
+				return new BadRequestObjectResult(ex.Message);
+			}
 		}
-
-		public static string GetEnvironmentVariable(string name)
-        {
-            return System.Environment.GetEnvironmentVariable(name, EnvironmentVariableTarget.Process);
-        }
-    }
+		
+		public string GetSetting(string name)
+		{
+			return Environment.GetEnvironmentVariable(name);
+		}
+	}
 }
